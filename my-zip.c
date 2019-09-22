@@ -1,22 +1,23 @@
 /* Needed by getline. */
 #define _GNU_SOURCE
 #include <stdio.h>
+#include <fcntl.h>
 #include <stdlib.h>
-#include <string.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
 
-#define BUFFER_SIZE 10000
-/* Bigger is better for systems with large memory.
-   Might waste a lot of memory if set too big. */
-#define MEMORY_MULTIPLIER 5
+/* Percentage of system memory that can be used at most */
+#define MAX_MEMORY_PERCENTAGE 0.02
+#define MEMORY_MULTIPLIER 2
+#define INITIAL_MEMORY 10000
 
-typedef struct String {
+typedef struct MappedFile {
     /* Data itself */
-    char* chars;
-    /* Physical size of the string. */
+    char* data;
+    /* Physical size of the file */
     int size;
-    /* Actual length of the string. */
-    int length;
-} String;
+} MappedFile;
 
 #pragma pack(push,1)
 typedef struct Rle {
@@ -33,30 +34,28 @@ typedef struct RleList {
     /* Data itself */
     Rle* data;
     /* Physical size of the Rle list. */
-    int size;
+    long size;
     /* Actual length of the Rle list. */
-    int length;
+    long length;
 } RleList;
 
+/* Overall memory amount that can be given to output usage. */
+long memory_amount;
+
+/* Function definations */
 FILE* open_file(char file_name[]) ;
-String read_file(FILE* file);
-RleList compress(char letters[], int start_pos, int end_pos);
-void string_allocate(String* string, int initial_size);
-void string_expand(String* string, int new_size);
-void string_append(String* string1, char string2[]);
-void string_combine(String* string1, String* string2);
-void string_free(String* string);
+MappedFile map_file(char file_name[]);
+unsigned long long get_usable_memory();
+void compress(RleList* output, char letters[], long start_pos, long end_pos);
 void rle_allocate(RleList* rlelist, int initial_size);
-void rle_expand(RleList* rlelist, int new_size);
+void rle_expand(RleList* rlelist, int requested_size);
 void rle_append(RleList* rlelist, Rle* rle);
 void rle_free(RleList* rlelist);
 
 int main(int argc, char** argv) {
-    FILE* file;
-    String lines;
-    string_allocate(&lines, BUFFER_SIZE);
-    String new_lines;
+    MappedFile mapped_file;
     RleList output;
+    long page_size;
     /* Check there is argument, if not print help. */
     if (argc == 1) {
         printf("wzip: file1 [file2 ...]\n");
@@ -64,127 +63,146 @@ int main(int argc, char** argv) {
     }
     /* Zip all the files with rle */
     else {
+        /* Get total memory amount. */
+        memory_amount = get_usable_memory();
+        /* Prepare output Rle list. */
+        rle_allocate(&output, INITIAL_MEMORY);
+        /* Count maximum page_size. */
+        page_size = (long)(memory_amount / sizeof(Rle*) - 1);
+        //page_size = 2;
         /* Read files to one large string. */
         for (int argument_number = 1; argument_number < argc; argument_number++) {
-            file = open_file(argv[argument_number]);
-            new_lines = read_file(file);
-            fclose(file);
-            /* Add latest file to big string. */
-            string_combine(&lines, &new_lines);
-            string_free(&new_lines);
+            mapped_file = map_file(argv[argument_number]);
+            /* Read file in chunks if there is not enough output memory for the worst case scenario */
+            long start = 0;
+            long end = 0;
+            while (1) {
+                /* Calculate start and end position based on page. */
+                /* On the beginning start from zero. */
+                if (end != 0) {
+                    start = end + 1;
+                }
+                else {
+                    start = 0;
+                }
+                if (page_size < mapped_file.size - end) {
+                    end = end + page_size;
+                }
+                else {
+                    end = mapped_file.size;
+                }
+                /* Move last element to first if needed. */
+                if (output.length > 0) {
+                    output.data[0].character = output.data[output.length - 1].character;
+                    output.data[0].count = output.data[output.length - 1].count;
+                    output.length = 1;
+                }
+                /* Start compression progress. */
+                compress(&output, mapped_file.data, start, end);
+                if (end < mapped_file.size) {
+                    /* Write compressed data to stdout but leave last entry out since its not complete. */
+                    /* Check that there is actually data to be written. */
+                    if (output.length > 1) {
+                        fwrite(output.data, sizeof(Rle), output.length - 1, stdout);
+                    }
+                }
+                else {
+                    /* Write end results to buffer but leave one result out if not final file
+                    incase next file will have same letter that should be combined. */
+                    if (argument_number != argc -1) {
+                        fwrite(output.data, sizeof(Rle), output.length - 1, stdout);
+                    }
+                    else {
+                        /* Write finally all bytes. */
+                        fwrite(output.data, sizeof(Rle), output.length, stdout);
+                    }
+                    break;
+                }
+            }
+            /* Free unnecessary memory. */
+            munmap(mapped_file.data, mapped_file.size);
         }
-        /* Start compression progress. */
-        output = compress(lines.chars, 0, lines.length);
-        /* Write compressed data to stdout. */
-        fwrite(output.data, sizeof(Rle), output.length, stdout);
+        /* Free remaining memory. */
+        rle_free(&output);
     }
-    /* Free left variables. */
-    string_free(&lines);
-    rle_free(&output);
     return 0;
 }
 
-FILE* open_file(char file_name[]) {
-    /* Open filehandle and check it success. */
-    FILE* file;
-    if ((file = fopen(file_name, "rb")) == NULL) {
+MappedFile map_file(char file_name[]) {
+    /* Map memory in the file.
+    Used https://stackoverflow.com/questions/20460670/reading-a-file-to-string-with-mmap
+    as an example for the operation.
+    Open filehandle and check it success. */
+    int file;
+    MappedFile mapped_file;
+    struct stat file_info;
+    if ((file = open(file_name, O_RDONLY)) == 0) {
         /* Exit if the file read fails */
-        printf("wgrep: cannot open file\n");
+        printf("wzip: cannot open file\n");
         exit(1);
     }
-    return file;
-}
-
-String read_file(FILE* file) {
-    /* Read file to long string quickly. */
-    char buffer[BUFFER_SIZE];
-    String lines;
-    string_allocate(&lines, BUFFER_SIZE * MEMORY_MULTIPLIER);
-    /* From fread man pages */
-    clearerr(file);
-    int read;
-    while (feof(file) == 0) {
-        /* Add always null to the end */
-        read = fread(buffer, sizeof(char), BUFFER_SIZE - 1, file);
-        buffer[read] = '\0';
-        string_append(&lines, buffer);
+    /* Get size of the file */
+    if (fstat(file, &file_info) != 0) {
+        printf("wzip: Failed to get file information. Exiting...");
+        exit(1);
     }
-    return lines;
+    mapped_file.size = file_info.st_size;
+    /* Map file to the memory. */
+    mapped_file.data = mmap(0, mapped_file.size, PROT_READ, MAP_PRIVATE, file, 0);
+    if (mapped_file.data == MAP_FAILED) {
+        printf("Failed to map file to memory. Exiting...");
+        exit(1);
+    }
+    /* According to this link it's okay to close file after mapping.
+    https://stackoverflow.com/questions/17490033/do-i-need-to-keep-a-file-open-after-calling-mmap-on-it */
+    close(file);
+    return mapped_file;
 }
 
-RleList compress(char letters[], int start_pos, int end_pos) {
+unsigned long long get_usable_memory() {
+    /* https://stackoverflow.com/questions/2513505/how-to-get-available-memory-c-g/26639774 */
+    long pages = sysconf(_SC_PHYS_PAGES);
+    long page_size = sysconf(_SC_PAGE_SIZE);
+    return (long)(pages * page_size * MAX_MEMORY_PERCENTAGE);
+}
+
+void compress(RleList* output, char letters[], long start_pos, long end_pos) {
     /* Compress given string with Run Length Encoding. */
-    RleList output;
     Rle element;
-    rle_allocate(&output, 100);
-    char letter = letters[start_pos];
-    int count = 1;
+    char letter;
+    int count;
+    /* Continue from the last item if there is allready data in the output. */
+    if (output->length > 0) {
+        letter = output->data[output->length - 1].character;
+        count = output->data[output->length - 1].count;
+        output->length--;
+    }
+    else {
+        letter = letters[start_pos];
+        count = 0;
+    }
     /* Idea of the compress function is to calculate how many occurances of same letter is found.
        Function works by comparing current and previous letters. If there is a difference
        function will save amount and letter to the list of structs that can be directly written
        in binary mode. */
-    for (int position = start_pos + 1; position <= end_pos; position++) {
+    for (int position = start_pos; position <= end_pos; position++) {
         if (letters[position] != letter) {
             element.character = letter;
             element.count = count;
             /* Add struct to list of structs. */
-            rle_append(&output, &element);
+            rle_append(output, &element);
             count = 0;
             letter = letters[position];
         }
         count++;
     }
-    return output;
-}
-
-void string_allocate(String* string, int initial_size) {
-    /* Allocate new dynamic string. */
-    string->size = initial_size;
-    string->length = 0;
-    if ((string->chars = (char*)calloc(initial_size, sizeof(char))) == NULL) {
-        printf("Couldn't allocate memory.\n");
-        exit(1);
+    /* If final character is not null append so far found character to output.
+       This is needed in paged situation. */
+    if (letters[end_pos] != '\0') {
+        element.character = letters[end_pos];
+        element.count = count;
+        rle_append(output, &element);
     }
-}
-
-void string_expand(String* string, int new_size) {
-    /* Make string double large of the requested size so it won't be expanded continously. */
-    if ((string->chars = (char*)realloc(string->chars, new_size * sizeof(char) * MEMORY_MULTIPLIER)) == NULL) {
-        printf("Couldn't allocate more memory.\n");
-        exit(1);
-    }
-    /* Update new physical size. */
-    string->size = new_size * MEMORY_MULTIPLIER;
-}
-
-void string_append(String* string1, char string2[]) {
-    /* Add classical C-string to dynamic string. */
-    int string2_length = strlen(string2);
-    int new_length;
-    new_length = string1->length + string2_length;
-    /* Check that there is enough space in dynamic string. */
-    if (new_length + 1 > string1->size) {
-        string_expand(string1, new_length);
-    }
-    /* Combine strings to first string. */
-    strncat(string1->chars, string2, string1->size);
-    string1->length = new_length;
-}
-
-void string_combine(String* string1, String* string2) {
-    /* Work basically as append function, but for two dynamic strings. */
-    int new_length;
-    new_length = string1->length + string2->length;
-    if (new_length + 1 > string1->size) {
-        string_expand(string1, new_length);
-    }
-    strncat(string1->chars, string2->chars, string1->size);
-    string1->length = new_length;
-}
-
-void string_free(String* string) {
-    /* Free dynamically allocated memory of the dynamic string. */
-    free(string->chars);
 }
 
 void rle_allocate(RleList* rlelist, int initial_size) {
@@ -197,14 +215,19 @@ void rle_allocate(RleList* rlelist, int initial_size) {
     }
 }
 
-void rle_expand(RleList* rlelist, int new_size) {
-    /* Make RleList double large of the requested size so it won't be expanded continously. */
-    if ((rlelist->data = (Rle*)realloc(rlelist->data, new_size * sizeof(Rle*) * MEMORY_MULTIPLIER)) == NULL) {
+void rle_expand(RleList* rlelist, int requested_size) {
+    /* Make RleList double large of the requested size so it won't be expanded continously.
+    Match size of maximum available memory if the new size is too large */
+    int new_size = requested_size * sizeof(Rle*) * MEMORY_MULTIPLIER;
+    if (new_size > memory_amount / sizeof(Rle*)) {
+        new_size = (int)(memory_amount / sizeof(Rle*));
+    }
+    if ((rlelist->data = (Rle*)realloc(rlelist->data, new_size)) == NULL) {
         printf("Couldn't allocate more memory.\n");
         exit(1);
     }
-    /* Update new physical size. */
-    rlelist->size = new_size * MEMORY_MULTIPLIER;
+    /* Update new physical size in structs. */
+    rlelist->size = new_size / sizeof(Rle*);
 }
 
 void rle_append(RleList* rlelist, Rle* rle) {
