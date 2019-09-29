@@ -22,4 +22,4 @@ My zip works by first mapping input file to the memory and then going trough it 
 My-unzip does reverse operation for my-zip. It converst compressed data back to text. Usage as follow `./my-unzip file1 file2 > output`
 
 ## Ostep-projects
-All programs in this repository are implementations of the ostep-projects initial-utilities. Full program definations maybe found [here] (https://github.com/remzi-arpacidusseau/ostep-projects/tree/master/initial-utilities)
+All programs in this repository are implementations of the ostep-projects initial-utilities. Full program definations maybe found [here](https://github.com/remzi-arpacidusseau/ostep-projects/tree/master/initial-utilities)
