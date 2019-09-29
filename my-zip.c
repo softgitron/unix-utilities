@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include <stdio.h>
 #include <sys/mman.h>
 #include "my-zip-lib.h"

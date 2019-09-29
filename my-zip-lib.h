@@ -5,7 +5,7 @@
 
 typedef struct MappedFile {
     /* Data itself */
-    char* data;
+    void* data;
     /* Physical size of the file */
     int size;
 } MappedFile;
@@ -30,12 +30,28 @@ typedef struct RleList {
     long length;
 } RleList;
 
+typedef struct String {
+    /* Data itself */
+    char* data;
+    /* Physical size of the string */
+    int size;
+    /* Virtual size of the string */
+    int length;
+} String;
+
 /* Function definations */
 long init_maximum_memory();
 FILE* open_file(char file_name[]);
 MappedFile map_file(char file_name[]);
 unsigned long long get_usable_memory();
+
 void rle_allocate(RleList* rlelist, int initial_size);
 void rle_expand(RleList* rlelist, int requested_size);
 void rle_append(RleList* rlelist, Rle* rle);
 void rle_free(RleList* rlelist);
+
+void string_allocate(String* string, int initial_size);
+void string_expand(String* string, int requested_size);
+void string_append(String* string1, char string2[]);
+void generate_chars(String* string, char character, int amount);
+void string_free(String* string);

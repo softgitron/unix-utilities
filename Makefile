@@ -17,8 +17,17 @@ my-zip-main.o: my-zip.c
 my-zip-lib.o: my-zip-lib.c
 	gcc my-zip-lib.c -c $(compile-flags)
 
+my-unzip: my-unzip-main.o my-zip-lib.o
+	gcc my-unzip-main.o my-zip-lib.o -o my-unzip 
+
+my-unzip-main.o: my-unzip.c
+	gcc my-unzip.c -c -o my-unzip-main.o $(compile-flags)
+
 my-zip-debug: compile-flags += -DDEBUG -g -O0
 my-zip-debug: my-zip
+
+my-unzip-debug: compile-flags += -DDEBUG -g -O0
+my-unzip-debug: my-unzip
 
 my-grep-debug: compile-flags += -DDEBUG -g -O0
 my-grep-debug: my-grep
